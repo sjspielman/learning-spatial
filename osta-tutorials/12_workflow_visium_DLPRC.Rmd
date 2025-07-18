@@ -1,0 +1,286 @@
+---
+title: "Workflow: Visium DLPFC"
+output: html_notebook
+---
+
+Source: https://lmweber.org/OSTA/pages/seq-workflow-dlpfc-spatiallibd.html
+
+> This workflow analyzes a 10x Genomics Visium dataset consisting of one sample (Visium capture area) of postmortem human brain tissue from the dorsolateral prefrontal cortex (DLPFC) region, originally described by Maynard et al. (2021).
+
+> The original full dataset contains 12 samples in total, from 3 donors, with 2 pairs of spatially adjacent replicates (serial sections) per donor (4 samples per donor). Each sample spans several cortical layers plus white matter in a tissue section. The examples in this workflow use a single representative sample, labeled 151673, which is often illustrated in various method papers in spatial omics data analysis.
+
+
+
+### Dependencies
+
+```{r}
+suppressPackageStartupMessages({
+  library(SpatialExperiment)
+  library(STexampleData)
+  library(ggspavis)
+  library(patchwork)
+  library(scater)
+  library(scran)
+  library(pheatmap)
+})
+set.seed(123)
+```
+
+
+### Workflow
+
+First we'll load the data
+
+```{r message =F}
+spe <- STexampleData::Visium_humanDLPFC()
+spe
+```
+
+As an initial check, plot the spatial coordinates (spots) in x-y dimensions, to check that the object has loaded correctly. We use plotting functions from the ggspavis package.
+
+```{r}
+# plot spatial coordinates (spots)
+# This is only available in >=bioc 3.21. But it turns out its replacing `plotSpots()`! 
+# So this function is there by another name in lower versions
+ggspavis::plotCoords(spe)
+```
+
+
+### QC
+
+> We calculate quality control (QC) metrics using the scater package (McCarthy et al. 2017), and apply simple global thresholding-based QC methods to identify any low-quality spots, as described in Section 9.3. More details, including more advanced QC approaches, are described in Chapter 9.
+
+```{r}
+sum(spe$in_tissue) # values 0 or 1
+dim(spe)
+
+# subset to keep only spots over tissue
+spe <- spe[, spe$in_tissue == 1]
+```
+
+
+standard business:
+```{r}
+# ooooof. we have a mito gene file
+is_mito <- grepl("(^MT-)|(^mt-)", rowData(spe)$gene_name)
+spe <- addPerCellQC(spe, subsets = list(mito = is_mito))
+```
+
+this tutorial uses hists to pick global thresholds:
+
+```{r, fig.width = 10, fig.height = 8}
+par(mfrow = c(2, 2))
+hist(spe$sum, xlab = "sum", main = "UMIs per spot")
+hist(spe$detected, xlab = "detected", main = "Genes per spot")
+hist(spe$subsets_mito_percent, xlab = "pct mito", main = "Percent mito UMIs")
+hist(spe$cell_count, xlab = "no. cells", main = "No. cells per spot")
+```
+
+```{r}
+# select global QC thresholds
+spe$qc_lib_size <- spe$sum < 600
+spe$qc_detected <- spe$detected < 400
+spe$qc_mito <- spe$subsets_mito_percent > 28
+
+# how much are we gonna lose? - we keep the FALSEs. TRUEs are discards
+table(spe$qc_lib_size)
+table(spe$qc_detected)
+table(spe$qc_mito)
+```
+
+
+
+
+
+there are some handy functions in `ggspavis` to visualize QC:
+
+We particularly want to see if what we are discarding is concentrated in space or spread around.
+
+> Plot the spatial distributions of the potentially identified low-quality spots, to ensure that they are not concentrated within biologically meaningful regions (which could suggest that the selected thresholds were too stringent).
+
+```{r, fig.width  =12}
+# plot spatial distributions of discarded spots
+# the `annotate=` are colData columns with thresholds which we added in the last chunk
+p1 <- plotObsQC(spe, 
+    plot_type = "spot", 
+    annotate = "qc_lib_size") + 
+    ggtitle("Library size (< threshold)")
+p2 <- plotObsQC(spe, 
+    plot_type = "spot", 
+    annotate = "qc_detected") +
+    ggtitle("Detected genes (< threshold)")
+p3 <- plotObsQC(spe, 
+    plot_type = "spot", 
+    annotate = "qc_mito") + 
+    ggtitle("Mito proportion (> threshold)")
+
+# arrange plots using patchwork package
+p1 | p2 | p3
+```
+
+
+Get a single discard vector in there and discard away.
+
+```{r}
+# combined set of identified spots
+spe$discard <- spe$qc_lib_size | spe$qc_detected | spe$qc_mito
+table(spe$discard)
+plotObsQC(spe, plot_type = "spot", annotate = "discard")
+```
+
+Stephanie DETOUR!
+
+What's going on with the other `plot_type` arguments here?
+From ggspavis docs:
+
+> The following types of QC plots are available for spot-level or cell-level QC (see plotFeatureQC for feature-level QC):
+
+> Histogram (plot_type = "histogram") for a single QC metric, e.g. number of UMI counts per spot. For number of counts per spot, the histogram can optionally highlight selected spots, e.g. spots with low library size.
+
+> Scatter plot (plot_type = "scatter") comparing two QC metrics, e.g. number of detected features vs. number of cells per spot, with optional horizontal and vertical lines highlighting QC filtering thresholds.
+
+> Spot plot (plot_type = "spot") showing spots in spatial x-y coordinates, e.g. highlighting selected spots that do not meet filtering thresholds.
+
+> Violin plot (plot_type = "violin") for a single QC metric, e.g. number of UMI counts per spot. For number of counts per spot, the violin plot can optionally highlight selected spots, e.g. spots with low library size.
+
+
+```{r}
+head(colData(spe))
+plotObsQC(spe, plot_type = "scatter", x_metric = "subsets_mito_detected", y_metric = "subsets_mito_percent")
+```
+
+```{r}
+# yeah ok not impressive.
+plotObsQC(spe, plot_type = "violin", x_metric = "qc_mito", y_metric = "subsets_mito_percent")
+```
+
+END OF DETOUR!
+
+
+Now we can actually discard.
+```{r}
+spe <- spe[, !spe$discard]
+dim(spe)
+```
+
+
+## Normalization
+
+Standard business: Make a simplified assumption that spots can be treated equivalently to single cells.
+Stephanie PSA: I can't tell if this is a good option or not, but again I will also be going through the `SpaNorm` tutorial which is a package for spatially-aware normalization.
+
+Importantly!!! - 
+
+> Some alternative non-spatial methods from scRNA-seq workflows (e.g. normalization by deconvolution) are also less appropriate for spot-based ST data, since spots can contain multiple cells from one or more cell types, and datasets can contain multiple samples (e.g. multiple tissue sections), which may result in sample-specific clustering.
+
+^ Therefore, we don't use `quickCluster()` with `computeSumFactors()` but instead take this simpler route:
+
+```{r}
+spe <- computeLibraryFactors(spe)
+spe <- logNormCounts(spe)
+spe # we've got a logcounts
+```
+
+### HVGs
+
+> We use methods from the scran (Lun, McCarthy, and Marioni 2016) package, again making the simplified assumption that spots can be treated as equivalent to single cells. We also first remove mitochondrial genes, since these tend to be very highly expressed and are not of main biological interest
+
+The tutorial indeed wholesale removes mito genes from the `spe` object.
+I'm not going to do that but I could..!
+
+```{r}
+# fit mean-variance relationship, decomposing variance into 
+# technical and biological components
+gene_var <- modelGeneVar(spe)
+
+# select top HVGs; they use prop = 0.1 but we often use n so i'm doing that here. doesn't really matter.
+top_hvgs <- getTopHVGs(gene_var, n = 2000)
+```
+
+Again there are also methods for spatially aware HVGs aka genes with high variability over space aka SVGs!
+I'll look at those later.
+
+> The set of SVGs may then be used either instead of or complementary to HVGs in subsequent steps.
+
+### reduced dimensions
+
+```{r}
+spe <- runPCA(spe, subset_row = top_hvgs)
+spe <- runUMAP(spe, dimred = "PCA")
+```
+
+Now, why on earth are we doing this? I'm not super sure. We already have a nice way to lay this out, that's the point of the method. Why do we need to be in this reduced dimension to viz?
+OSTA gives no reasoning, it just plows on through.
+
+
+### clustering
+
+
+this example only uses expression data, not spatial information.
+we use different code but i'm gonna be lazy and just copy their code and not adapt to our conventions.
+
+```{r}
+# graph-based clustering
+k <- 10
+g <- buildSNNGraph(spe, k = k, use.dimred = "PCA")
+g_walk <- igraph::cluster_walktrap(g)
+
+# TIL about the colLabels function?!! this is terrible. it makes a `label` column. 
+#colLabels(spe) <- factor(g_walk$membership)
+
+spe$label <- factor(g_walk$membership)
+colData(spe) 
+
+```
+
+plot it on the spots!!
+```{r}
+plotCoords(spe, annotate = "label", pal = "libd_layer_colors")
+```
+
+They also plot a colored UMAP and again I am not sure why.
+
+## Differential expression
+
+> Identify marker genes for each cluster or spatial domain by testing for differentially expressed genes using pairwise t-tests, specifically testing for upregulation for each cluster or spatial domain.
+
+They use scran for this; I don't think an analysis like this would be in any intro workshop we teach though.
+
+```{r}
+# using scran package
+mgs <- findMarkers(spe, groups = spe$label, 
+                   test = "binom", direction = "up")
+top <- lapply(mgs, \(df) rownames(df)[df$Top <= 2])
+top <- unique(unlist(top)) # wow they had this line, insane: length(top <- unique(unlist(top)))
+
+
+# visualize using a heatmap
+pbs <- aggregateAcrossCells(spe, 
+  ids = spe$label, subset.row = top, 
+  use.assay.type = "logcounts", statistics = "mean")
+
+# use gene symbols as feature names
+mtx <- t(assay(pbs))
+colnames(mtx) <- rowData(pbs)$gene_name
+
+# plot using pheatmap package
+pheatmap(mat = mtx, scale = "column")
+```
+
+
+
+## spatialLBD
+
+the rest of this tutorial walks through use of the `spatialLBD` package (at least one author is same as OSTA, so there you go).
+
+> In this section, we will use the spatialLIBD package (Pardo et al. 2022) to continue analyzing this dataset by creating an interactive Shiny website to visualize the data.
+
+This actually seems like an interesting tool but not one I think we want in a workshop?
+The steps involve setting up the object for use with the package, including GTF info, some other little variables to add in, and filtering.
+The package has a function to check the `spe` object, and then you can make a shiny website from it which really is neat just not at all reproducible.
+
+
+
+```{r}
+sessionInfo()
+```
