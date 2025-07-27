@@ -1,0 +1,313 @@
+---
+title: "Workflow: Visium CRC"
+output: html_notebook
+---
+
+Source:https://lmweber.org/OSTA/pages/seq-workflow-visium-crc.html
+
+> Visium data on a human colorectal cancer biopsy from Oliveira et al. (2024). 
+
+
+
+### Dependencies
+
+```{r}
+library(osfr)
+library(scran)
+library(scater)
+library(igraph)
+library(AUCell)
+library(scuttle)
+library(spacexr)
+library(msigdbr)
+library(VisiumIO)
+library(jsonlite)
+library(ggspavis)
+library(pheatmap)
+library(patchwork)
+library(OSTA.data)
+library(BiocParallel)
+library(DropletUtils)
+library(SpatialExperiment)
+# specify whether/how to 
+# perform parallelization
+bp <- MulticoreParam(th <- 4)
+# set seed for random number generation
+# in order to make results reproducible
+set.seed(194849)
+```
+
+
+### Workflow
+
+First we'll load the data
+
+```{r}
+# retrieve dataset from OSF repo
+id <- "Visium_HumanColon_Oliveira"
+pa <- OSTA.data_load(id)
+dir.create(td <- tempfile())
+unzip(pa, exdir=td)
+
+
+# read into 'SpatialExperiment'
+obj <- VisiumIO::TENxVisium(
+    spacerangerOut=td, 
+    format="h5", 
+    images="lowres")
+spe <- import(obj)
+```
+
+```{r}
+spe
+```
+
+## 13.3: Quality control
+
+```{r}
+# use gene symbols as feature names
+# SJS: currently it's ensembl ids, but fine i'll follow along
+rownames(spe) <- make.unique(rowData(spe)$Symbol)
+
+# add per-cell quality control metrics
+sub <- list(mt=grep("^MT-", rownames(spe)))
+spe <- addPerCellQCMetrics(spe, subsets=sub)
+
+# determine outliers via thresholding on MAD from the median
+ol <- perCellQCFilters(spe, sub.fields="subsets_mt_percent")
+ol
+```
+
+```{r}
+# add results as cell metadata
+colData(spe)[names(ol)] <- ol 
+# tabulate # and % of cells that'd 
+# be discarded for different reasons
+data.frame(
+    check.names=FALSE,
+    `#`=apply(ol, 2, sum), 
+    `%`=round(100*apply(ol, 2, mean), 2))
+```
+
+
+Let’s see which spots would be excluded according to the above criteria:
+
+```{r, fig.width = 12}
+lapply(names(ol), \(.) 
+       
+    ggspavis::plotCoords(spe, annotate=.) + ggtitle(.)) |>
+    patchwork::wrap_plots( nrow=1, guides="collect") &
+    guides(col=guide_legend(override.aes=list(size=3))) &
+    scale_color_manual("discard", values=c("lavender", "purple")) &
+    theme(plot.title=element_text(hjust=0.5), legend.key.size=unit(0, "lines"))
+```
+SJS so takeaway, I can do things like:
+
+```{r}
+ggspavis::plotCoords(spe, annotate = "low_n_features") + 
+  scale_color_manual(values = c("navy", "orange"))
+```
+
+> It seems like low-quality spots are highly spatially organized, so that might might encourage us to not remove them, for now. We will see further below how the quality control metrics used here, and spots deemed to be discarded, are distributed across (transcription-based) clusters.
+
+
+---> SJS: Non-random QC issues could be indicative of biology, so we might want to leave alone.
+
+
+## Preprocessing, clustering
+
+```{r}
+# log-library size normalization
+spe <- logNormCounts(spe)
+# highly variable feature selection
+tbl <- modelGeneVar(spe)
+sel <- getTopHVGs(tbl, n=2e3)
+# principal component analysis
+spe <- runPCA(spe, subset_row=sel)
+
+# build shared nearest-neighbor (SNN) graph
+g <- buildSNNGraph(spe, use.dimred="PCA", type="jaccard")
+# cluster via Leiden community detection algorithm
+k <- cluster_leiden(g, objective_function="modularity", resolution=0.5)
+table(spe$Leiden <- factor(k$membership))
+```
+
+## 13.6 Deconvolution
+
+> In a complementary approach, we deconvolute spot measurements using (annotated) reference single-cell data provided by the authors. 
+> Let’s first retrieve these data, alongside corresponding cell metadata, which includes low- (Level1) and high-resolution (Level2) annotations into 10 and 32 subpopulations, respectively.
+
+
+Get the cell metadata:
+```{r}
+# retrieve dataset from OSF repo
+id <- "Chromium_HumanColon_Oliveira"
+pa <- OSTA.data_load(id)
+dir.create(td <- tempfile())
+unzip(pa, exdir=td)
+
+# read into 'SingleCellExperiment'
+fs <- list.files(td, full.names=TRUE)
+h5 <- grep("h5$", fs, value=TRUE)
+sce <- read10xCounts(h5, col.names=TRUE)
+# add cell metadata
+csv <- grep("csv$", fs, value=TRUE)
+cd <- read.csv(csv, row.names=1)
+colData(sce)[names(cd)] <- cd[colnames(sce), ]
+# use gene symbols as feature names
+rownames(sce) <- make.unique(rowData(sce)$Symbol)
+# exclude cells deemed to be of low-quality
+sce <- sce[, sce$QCFilter == "Keep"]
+# tabulate subpopulations
+table(sce$Level1)
+```
+
+
+> Next, we perform deconvolution with spacexr (RCTD) (Cable et al. 2022). 
+> By default, runRctd()’s rctd_mode="doublet", i.e., at most two subpopulations are fit per pixel; here, we set rctd_mode="full" in order to allow for an arbitrary number of subpopulations to be fit instead.
+
+SJS: they...
+- get only 1 patient and downsample cells, randomly
+
+
+```{r}
+# prep reference data (Chromium);
+# subset cells from same patient
+.sce <- sce[, grepl("P2", sce$Patient)]
+
+# downsample to at most 4,000 cells per cluster
+cs <- split(seq_len(ncol(.sce)), .sce$Level1)
+cs <- lapply(cs, \(.) sample(., min(length(.), 4e3)))
+.sce <- .sce[, unlist(cs)]
+```
+```{r}
+# run 'RCTD' deconvolution
+rctd_data <- spacexr::createRctd(spe, .sce, cell_type_col="Level1")
+(res <- spacexr::runRctd(rctd_data, max_cores=th, rctd_mode="full"))
+
+```
+Took 5-8 minutes with 4 threads.
+Here's its output, it's an `spe` with cell types as rownames and barcodes as colnames... oh the values are like unittless confidence something something?
+Weights, ok, fine.
+
+```{r}
+res
+```
+> Weights inferred by RCTD should be normalized such that proportions of cell types sum to 1 in each spot:
+
+```{r}
+# scale weights such that they sum to 1
+ws <- assay(res)
+ws <- sweep(ws, 2, colSums(ws), `/`)
+# add proportion estimates as metadata
+ws <- data.frame(t(as.matrix(ws)))
+colData(spe)[names(ws)] <- ws[colnames(spe), ]
+```
+
+> For comparison with unsupervised clustering (SNN-based Leiden), we also include assignments we would obtain if we were to assign spots the most frequent label (in terms of deconvolution estimates):
+
+```{r}
+ids <- names(ws)[apply(ws, 1, which.max)]
+table(spe$RCTD <- factor(ids), spe$Leiden)
+```
+
+
+> We can also compartmentalize the tissue into broad biological compartments; here, by grouping RCTD-based subpopulation assignments into four classes:
+
+
+```{r}
+lab <- list(
+    tum="Tumor",
+    epi="Intestinal.Epithelial",
+    imm=c("B.cells", "T.cells", "Myeloid"),
+    str=c("Endothelial", "Fibroblast", "Smooth.Muscle"))
+idx <- match(spe$RCTD, unlist(lab))
+lab <- rep.int(names(lab), sapply(lab, length))
+table(spe$Domain <- factor(lab[idx]))
+```
+
+> Let’s visualize deconvolution weights in space, i.e., coloring by the proportion of a given cell type estimated to fall within a given spot:
+
+
+```{r, fig.width = 10, fig.height = 10}
+names(ws)
+
+
+lapply(names(ws), \(.) 
+    plotCoords(spe, annotate=.)) |>
+    wrap_plots(nrow=3) & theme(
+    legend.key.width=unit(0.5, "lines"),
+    legend.key.height=unit(1, "lines")) &
+    scale_color_gradientn(colors=pals::jet())
+```
+
+
+```{r, fig.width = 10, fig.height = 5}
+lapply(c("Leiden", "Domain", "RCTD"), 
+    \(.) plotCoords(spe, annotate=.)) |>
+    wrap_plots(nrow=1) &
+    theme(legend.key.size=unit(0, "lines")) &
+    scale_color_manual(values=unname(pals::trubetskoy()))
+```
+>To help characterize subpopulations from unsupervised clustering, we can view their distribution across deconvolution-based clusters and broad domains; e.g., tumor spots are quite diverse, while smooth muscle spots and (normal) epithelia map almost completely to a single cluster:
+
+```{r}
+cd <- data.frame(colData(spe))
+df <- as.data.frame(with(cd, table(RCTD, Leiden)))
+fd <- as.data.frame(with(cd, table(Domain, Leiden)))
+
+ggplot(df, aes(Freq, RCTD, fill=Leiden)) + ggtitle("RCTD") +
+ggplot(fd, aes(Freq, Domain, fill=Leiden)) + ggtitle("Domain") +
+plot_layout(nrow=1, guides="collect") &
+    labs(x="Proportion", y=NULL) &
+    coord_cartesian(expand=FALSE) &
+    geom_col(width=1, col="white", position="fill") &
+    scale_fill_manual(values=unname(pals::trubetskoy())) &
+    theme_minimal() & theme(aspect.ratio=1,
+        legend.key.size=unit(2/3, "lines"),
+        plot.title=element_text(hjust=0.5))
+```
+        
+
+>Let’s inspect the key drivers of (expression) variability in terms of PCs. Considering clustering and deconvolution results from above, we can see that
+
+>   PC1 distinguishes stromal from both normal and malignant epithelia;
+>    PC2 clearly separates (normal) intestinal epithelium from all else;
+>    PC3 captures a fibroblast-rich region, and normal epithelia;
+>    PC5 separates fibroblasts and smooth muscle cells; etc.
+
+```{r}
+pcs <- reducedDim(spe, "PCA")
+colData(spe)[colnames(pcs)] <- pcs
+
+lapply(colnames(pcs)[seq_len(6)], 
+    \(.) plotCoords(spe, annotate=.) +
+    scale_color_gradientn(., colors=pals::jet())) |>
+    wrap_plots(nrow=2) & theme(
+        plot.title=element_blank(),
+        legend.key.width=unit(0.5, "lines"),
+        legend.key.height=unit(1, "lines"))
+```
+> Quality control metrics tend to be low for specific clusters. Their patch-like pattern, in turn, explains the clustering of low-quality spots seen earlier.
+
+```{r}
+lapply(c("detected","subsets_mt_percent"), \(.)
+    plotColData(spe, x=., y="Leiden", color_by="discard", point_size=0.1) +
+    scale_x_discrete(limits=names(sort(by(spe[[.]], spe$Leiden, median))))) |>
+    wrap_plots(nrow=1, guides="collect") &
+    scale_color_manual("discard", values=c("lavender", "purple")) &
+    guides(col=guide_legend(override.aes=list(alpha=1, size=3))) &
+    theme_minimal() & theme(
+        panel.grid.minor=element_blank(), 
+        legend.key.size=unit(0, "lines"))
+```
+
+
+## Signatures: gene sets instead of individual genes
+
+> I'm not going through this since I feel it's beyond the scope for an intro course, but they use AUCell, visualize Z-scores for different gene sets tested with plotCoords.
+
+
+```{r}
+sessionInfo()
+```

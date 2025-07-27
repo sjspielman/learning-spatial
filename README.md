@@ -13,3 +13,8 @@ Aiming to treat this README like a lab notebook.
   - This workflow used essentially standard SCE-esque approaches for an `spe` object, i.e. _not spatially-aware methods_
   - Introduced some nice `ggspavis` plots including QC plots
   - The last part introduces their `spatialLBD` package which seems very nice but not for use in a workshop
+- Completed the OSTA: Visium CRC workflow
+  - Read in the 10x visium data directly with the `VisiumIO` package
+  - Showed a method for cell deconvolution `spacexr` which I'll look into further
+    - Some exploratory viz on these results too
+  - Introduced using AUCell, but I didn't go through that part
