@@ -4,6 +4,15 @@ I'm doing tutorials and such.
 Aiming to treat this README like a lab notebook.
 
 
+### 2025-07-25
+
+- Completed the OSTA: Visium HD workflow
+  - Comparisons of clustering, deconvolution between different spatial resolutions from 10x
+  - Several spatially-aware methods were presented:
+    - `SpotSweeper` for initial QC
+    - `BANKSY` for clustering (noting it used HVGs, not SVGs!)
+    - `spacexr` for deconvolution, but since Visium HD it's a different resolution from `spacexr` as presented in the `Vision: CRC` workflow, and associated exploratory analysis
+
 ### 2025-07-18
 
 - Environment setup is different from what we currently have on the server:
