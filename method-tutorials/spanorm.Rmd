@@ -1,0 +1,157 @@
+---
+title: "SpaNorm tutorial"
+output: html_notebook
+---
+
+Source: https://bioconductor.org/packages/release/bioc/vignettes/SpaNorm/inst/doc/SpaNorm.html
+
+Paper: https://genomebiology.biomedcentral.com/articles/10.1186/s13059-025-03565-y
+
+`SpaNorm` is a very new method that is not really yet adopted by the community but seems like it could be promising eventually and it made it into Bioconductor, so worth getting to know a little bit.
+There aren't really other spatially-aware normalization approaches so this is it for the field right now it seems. 
+
+
+### Dependencies
+
+```{r}
+suppressPackageStartupMessages({
+  library(SpaNorm)
+  library(SpatialExperiment)
+  library(ggplot2)
+  library(patchwork)
+})
+
+set.seed(123)
+```
+
+
+
+Load count data and do this very upsetting thing everyone does:
+
+```{r}
+# load sample data
+data(HumanDLPFC)
+# change gene IDs to gene names
+rownames(HumanDLPFC) <- rowData(HumanDLPFC)$gene_name
+
+HumanDLPFC
+```
+
+```{r}
+# plot regions
+p_region <- plotSpatial(HumanDLPFC, 
+            color = AnnotatedCluster, 
+            size = 0.5) +
+  scale_colour_brewer(palette = "Paired") +
+  guides(color = guide_legend(override.aes = list(shape = 15, size = 5))) +
+  ggtitle("Region") +
+  # i'm adding this
+  coord_equal()
+
+p_region
+```
+
+
+They introduce a `filterGenes()` function. 
+This seems to just remove genes with low expression; takes two arguments, `spe`, and the `prop` expression threshold for filtering.
+I'll follow along...
+
+```{r}
+keep <- filterGenes(HumanDLPFC, 0.2) # logical vector of rows
+table(keep) # this ends up discarding about half!
+HumanDLPFC <- HumanDLPFC[keep, ]
+```
+
+Now, they show a naive log transformation.
+
+```{r}
+logcounts(HumanDLPFC) <- log2(counts(HumanDLPFC) + 1)
+
+p_count_naive <- plotSpatial(
+    HumanDLPFC,
+    colour = MOBP,
+    what = "expression",
+    assay = "logcounts",
+    size = 0.8 # i bumped this from 0.5 since I think it's easier to see
+  ) +
+  scale_colour_viridis_c(option = "F") +
+  ggtitle("logCounts") +
+  # i'm adding this
+  coord_equal()
+p_region + p_count_naive
+```
+They claim that we expect this expression to be high in `WM` but it isn't, which demonstrates that log normalization isn't great. 
+(Ok but, who thought so?)
+
+
+I'm going to add in a little bit of a detour - let's do what `OSTA` recommends
+
+```{r, fig.width = 12}
+HumanDLPFC <- scuttle::computeLibraryFactors(HumanDLPFC)
+HumanDLPFC <- scuttle::logNormCounts(HumanDLPFC)
+
+# replot
+p_count_osta <- plotSpatial(
+    HumanDLPFC,
+    colour = MOBP,
+    what = "expression",
+    assay = "logcounts",
+    size = 0.8 # i bumped this from 0.5 since I think it's easier to see
+  ) +
+  scale_colour_viridis_c(option = "F") +
+  ggtitle("OSTA normalization") +
+  # i'm adding this
+  coord_equal()
+p_region + p_count_naive + p_count_osta
+```
+It's actually quite nicely expressed with the recommended approach in the `WM`. 
+So, next we'll see what spanorm does.
+
+
+```{r}
+# Start the clock!
+ptm <- proc.time()
+
+HumanDLPFC <- SpaNorm::SpaNorm(HumanDLPFC) # 44 seconds
+# by default it runs on a subset of 25% of cells for time
+
+# Stop the clock
+proc.time() - ptm
+```
+
+
+```{r fig.height=10, fig.width=10}
+# replot
+p_count_spanorm <- plotSpatial(
+    HumanDLPFC,
+    colour = MOBP,
+    what = "expression",
+    assay = "logcounts",
+    size = 0.8 # i bumped this from 0.5 since I think it's easier to see
+  ) +
+  scale_colour_viridis_c(option = "F") +
+  ggtitle("SpaNorm") +
+  # i'm adding this
+  coord_equal()
+(p_region + p_count_naive) /  (p_count_osta + p_count_spanorm)
+```
+
+
+It's definitely boosted even further with `SpaNorm`, no question.
+
+The fit information lives here:
+If it exists already in the object, `SpaNorm()` will overwrite the `logcounts` assay if it exists unless overwrite is set to `FALSE`.
+
+```{r}
+metadata(HumanDLPFC)$SpaNorm
+```
+
+
+They make a couple plots of the stats here to showcase that the biological variation is as expected, but I'm not going to reproduce those here.
+
+
+The rest of the tutorial goes through more advanced usage options of the package including model complexity, but that's enough for us here.
+
+```{r}
+sessionInfo()
+```
