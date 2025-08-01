@@ -8,6 +8,9 @@ Aiming to treat this README like a lab notebook.
 - Went through the `SpaNorm` tutorial
   - Method runs pretty quick and _with the tutorial example_ does seem to preserve biology more than scuttle
   - But, method is very new and has not really been adopted yet, so unclear how important it is to show
+- Went through the `SpotSweeper` tutorial
+  - Also very quick method, and seems like an important approach to include in a workshop
+  - Has good QC plotting functionality
 
 ### 2025-07-25
 
