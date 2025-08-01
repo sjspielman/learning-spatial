@@ -1,0 +1,146 @@
+---
+title: "SpotSweeper tutorial"
+output: html_notebook
+---
+
+Source: https://bioconductor.org/packages/release/bioc/vignettes/SpotSweeper/inst/doc/getting_started.html
+
+`SpotSweeper` seems like a very, very reasonable QC approach - let's try it out.
+
+```{r}
+suppressPackageStartupMessages({
+  library(SpotSweeper)
+  library(SpatialExperiment)
+})
+
+set.seed(123)
+```
+
+```{r}
+# load  Maynard et al DLPFC daatset
+spe <- STexampleData::Visium_humanDLPFC()
+
+# show column data before SpotSweeper
+colnames(colData(spe))
+
+
+spe <- spe[, spe$in_tissue == 1]
+```
+
+We start off calculating QC with `scuttle`.
+My god everyone loves gene names.
+
+```{r}
+# change from gene id to gene names
+rownames(spe) <- rowData(spe)$gene_name
+
+# identifying the mitochondrial transcripts
+is.mito <- rownames(spe)[grepl("^MT-", rownames(spe))]
+
+# calculating QC metrics for each spot using scuttle
+spe <- scuttle::addPerCellQCMetrics(spe, subsets = list(Mito = is.mito))
+colnames(colData(spe))
+```
+
+
+So, these are the _global QC_ which the paper argues are not suitable for ST data.
+
+Now we can use `SpotSweeper` to get at _local outliers_:
+
+> We’ll use the localOutliers function to detect local outliers based on the unique detected genes, total library size, and percent of the total reads that are mitochondrial. These methods assume a normal distribution, so we’ll use the log-transformed sum of the counts and the log-transformed number of detected genes. 
+For mitochondrial percent, we’ll use the raw mitochondrial percentage.
+
+
+```{r}
+# these all get named in the colData as "{metric}_outliers"
+# library size
+spe <- localOutliers(spe,
+    metric = "sum",
+    direction = "lower",
+    log = TRUE
+) ### --> sum_outliers
+
+# unique genes
+spe <- localOutliers(spe,
+    metric = "detected",
+    direction = "lower",
+    log = TRUE
+) #---> detected_outliers
+
+# mitochondrial percent
+spe <- localOutliers(spe,
+    metric = "subsets_Mito_percent",
+    direction = "higher",
+    log = FALSE
+) #----> subsets_Mito_percent_outliers
+
+
+# combine all the outlier detections into a single column:
+# combine all outliers into "local_outliers" column
+spe$local_outliers <- as.logical(spe$sum_outliers) |
+    as.logical(spe$detected_outliers) |
+    as.logical(spe$subsets_Mito_percent_outliers)
+```
+
+```{r}
+colData(spe)
+```
+
+Now we can do some viz!
+The tutorial uses the `escheR` package but since then this function to plot C
+
+```{r}
+# all local outliers
+SpotSweeper::plotQCmetrics(
+  spe, 
+  metric = "sum_log",  # This isn't immediately clear
+  outliers = "local_outliers", # this used to require a 2nd dependency, no longer!
+  point_size = 2,
+  stroke = 1
+) +ggtitle("All Local Outliers")
+```
+
+We now load a different dataset to be able to QC out a hangnail artifact for demo.
+
+
+```{r}
+data(DLPFC_artifact)
+spe <- DLPFC_artifact
+```
+
+We'll plot some QC using _an existing colData column_:
+
+```{r}
+plotQCmetrics(spe,
+    metric = "expr_chrM_ratio",
+    outliers = NULL, point_size = 2
+) +
+    ggtitle("Mitochondrial Percent")
+```
+Now we can use `SpotSweeper::findArtifacts()`:
+
+```{r}
+# find artifacts using SpotSweeper
+spe <- findArtifacts(spe,
+    mito_percent = "expr_chrM_ratio",
+    mito_sum = "expr_chrM",
+    n_order = 5,
+    name = "artifact"
+)
+
+# visualize them
+plotQCmetrics(spe,
+    metric = "expr_chrM_ratio",
+    outliers = "artifact", point_size = 2
+) +
+    ggtitle("Hangnail artifact")
+```
+The `artifact` column would be used to filter:
+```{r}
+colData(spe)$artifact |> head()
+```
+
+```{r}
+sessionInfo()
+```
+
