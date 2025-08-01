@@ -3,6 +3,11 @@
 I'm doing tutorials and such.
 Aiming to treat this README like a lab notebook.
 
+### 2025-08-01
+
+- Went through the `SpaNorm` tutorial
+  - Method runs pretty quick and _with the tutorial example_ does seem to preserve biology more than scuttle
+  - But, method is very new and has not really been adopted yet, so unclear how important it is to show
 
 ### 2025-07-25
 
