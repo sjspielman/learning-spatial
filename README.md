@@ -3,6 +3,13 @@
 I'm doing tutorials and such.
 Aiming to treat this README like a lab notebook.
 
+### 2025-08-07
+
+- Went through the Banksy quick start and a bit of a vignette that provides more (but not much!) context about choosing parameters
+  - Very quick, very straightforward to use, and there are strategies we can use to compare different flavors of clustering, e.g. how much cell vs neighborhood is considered
+  - Parameters can be set to the given technology so this is flexible for most input data
+
+
 ### 2025-08-01
 
 - Went through the `SpaNorm` tutorial

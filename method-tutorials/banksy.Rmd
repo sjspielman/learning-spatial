@@ -1,0 +1,256 @@
+---
+title: "Banksy"
+output: html_notebook
+---
+
+Banksy does a lot of things!
+I am not trying to do all of those things here, but I am trying to run through some of its _fundamentals_.
+
+I'm going to do two things here:
+
+1. The Quick Start: <https://prabhakarlab.github.io/Banksy/#quick-start>
+2. The vignette on clustering parameter selection: <https://www.bioconductor.org/packages/release/bioc/vignettes/Banksy/inst/doc/parameter-selection.html>
+
+Both of these use a mouse hippocampus VeraFISH dataset.
+As such, it doesn't have a ton of genes but it has great resolution!
+
+> This dataset comprises **VeraFISH** profiling of cells in the mouse hippocampus.
+> Gene expression and cell centroids for 10,944 cells and 120 genes in 2 spatial dimensions are provided
+
+(their docs say 129 actually but it's a typo, there's 120.)
+
+
+## Quick Start
+
+Load BANKSY. We’ll also load SpatialExperiment and SummarizedExperiment for containing and manipulating the data, scuttle for normalization and quality control, and scater, ggplot2 and cowplot for visualisation.
+
+SJS: It's unbelievable to me how cowplot took over.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Banksy)
+  
+  library(SummarizedExperiment)
+  library(SpatialExperiment)
+  library(scuttle)
+  
+  library(scater)
+  library(cowplot)
+  library(ggplot2)  
+    
+})
+```
+
+Here, we’ll run BANKSY on mouse hippocampus data.
+
+. For details on how this dataset was 
+#' generated, refer to Supplementary Information section 2.2 of our 
+
+```{r}
+data(hippocampus)
+gcm <- hippocampus$expression # counts
+locs <- as.matrix(hippocampus$locations) #spatialcoords
+se <- SpatialExperiment(assay = list(counts = gcm), spatialCoords = locs)
+```
+
+SJS: They are doing QC here with `scuttle` using custom thresholds and then normalization.
+We would probably want to use `SpotSweeper` for QC in the end, but for normalization this seems reasonable at this stage of the ST field.
+ 
+```{r}
+# QC based on total counts
+qcstats <- perCellQCMetrics(se)
+thres <- quantile(qcstats$total, c(0.05, 0.98))
+keep <- (qcstats$total > thres[1]) & (qcstats$total < thres[2])
+se <- se[, keep]
+
+# Normalization to mean library size
+se <- computeLibraryFactors(se)
+aname <- "normcounts"
+assay(se, aname) <- normalizeCounts(se, log = FALSE)
+
+se
+```
+ 
+ 
+ 
+ 
+ 
+ > An important note about choosing the lambda parameter for the older Visium v1 / v2 55um datasets or the original ST 100um technology:
+
+> For most modern high resolution technologies like Xenium, Visium HD, StereoSeq, MERFISH, STARmap PLUS, SeqFISH+, SlideSeq v2, and CosMx (and others), we recommend the usual defults for lambda: For cell typing, use lambda = 0.2 (as shown below, or in this vignette) and for domain segmentation, use lambda = 0.8.
+
+> However, for the older Visium v1/v2 or ST technologies, with their much lower resolution spots (55um and 100um diameter, respectively), we find that lambda = 0.2 seems to work best for domain segmentation. This could be because each spot already measures the average transcriptome of several cells in a neighbourhood.  It seems that lambda = 0.2 shares enough information between these neighbourhoods to lead to good domain segmentation performance.
+> Also note that in these lower resolution technologies, each spot can have multiple cells of different types, and as such cell-typing is not defined for them.
+
+
+Compute the neighborhood matrices for BANKSY. 
+
+- Setting `compute_agf=TRUE` computes both the weighted neighborhood mean (`M)` and the azimuthal Gabor filter (`G`). 
+  - The number of spatial neighbors used to compute `M` and `G` are `k_geom[1]=15` and `k_geom[2]=30` respectively. 
+- We run BANKSY at `lambda=0` corresponding to non-spatial clustering, and `lambda=0.2` corresponding to BANKSY for cell-typing.
+
+SJS: The data we are working with here has to be higher res, and since there are so few genes maybe it's Xenium.
+SJS TODO: why both? next tutorial should help with that.
+
+```{r}
+lambda <- c(0, 0.2) # can run multiple clusterings simultaneously!
+k_geom <- c(15, 30)
+
+# very quick!
+se <- Banksy::computeBanksy(se, assay_name = aname, compute_agf = TRUE, k_geom = k_geom)
+
+# this is helpful:
+metadata(se)$BANKSY_params
+```
+
+Next, run PCA on the BANKSY matrix and perform clustering. Setting `use_agf=TRUE` uses both M and G to construct the BANKSY matrix.
+
+SJS: Really the crux function is `Banksy::runBanksyPCA()` and the others are wrappers.
+As long as we pass in the Banksy PCA to the next steps, we're in Banksy land and it's fine to use `scater` and `bluster` etc.
+
+```{r}
+set.seed(1000)
+se <- Banksy::runBanksyPCA(se, use_agf = TRUE, lambda = lambda)
+se <- Banksy::runBanksyUMAP(se, use_agf = TRUE, lambda = lambda) # this just wraps umap()
+se <- Banksy::clusterBanksy(se, use_agf = TRUE, lambda = lambda, resolution = 1.2) # this is just a wrapper to
+
+# So we get out 
+se
+```
+
+We get out:
+
+- PCA and UMAP for each `lambda` (0 and 0.2) in reducedDim
+- clusters for each `lambda` in `colData()`
+
+
+Different clustering runs can be relabeled to minimise their differences with connectClusters:
+SJS: Why tho? if lambda 0 was meant to be a different scenario? don't we want differences...?
+
+```{r}
+se <- Banksy::connectClusters(se)
+```
+
+
+Visualise the clustering output for **non-spatial clustering (lambda=0) and BANKSY clustering (lambda=0.2)**.
+
+The left is non-spatial and the right is spatial.
+
+```{r, fig.width = 12}
+cnames <- colnames(colData(se))
+cnames <- cnames[grep("^clust", cnames)]
+colData(se) <- cbind(colData(se), spatialCoords(se)) # gets sdimx sdimy into colData
+
+plot_nsp <- scater::plotColData(se,
+    x = "sdimx", y = "sdimy",
+    point_size = 0.6, colour_by = cnames[1]
+)
+plot_bank <- scater::plotColData(se,
+    x = "sdimx", y = "sdimy",
+    point_size = 0.6, colour_by = cnames[2]
+)
+
+
+plot_grid(plot_nsp + coord_equal(), plot_bank + coord_equal(), ncol = 2)
+```
+
+Facet view!
+SJS: some similtarities for sure but also differences for sure. 
+The lambda parameter did a thing!
+
+```{r, fig.width = 12}
+
+plot_grid(
+    plot_nsp + facet_wrap(~colour_by),
+    plot_bank + facet_wrap(~colour_by),
+    ncol = 2
+)
+```
+The final step in this quick-start is plotting the UMAP, which I continue to not understand why people do.
+
+
+## Clustering parameter selection
+
+The code in this tutorial is roughly similar but it explains some of the parameters more in depth so I'm just going to toss in _new items_ that weren't in the previous tutorial here.
+
+### Parameter insights
+
+#### AGF usage
+
+For characterising neighborhoods, BANKSY computes the weighted neighborhood mean (H_0) and the azimuthal Gabor filter (H_1), which estimates gene expression gradients. Setting compute_agf=TRUE computes both H_0 and H_1.
+
+SJS: banksy combines cell intrinsic info (eg expression) with neighborhood info. 
+How to determine the weights of these contributions?
+You can either set a universal weight to apply to all cells (agf=FALSE), or set it to TRUE and then it's determined based on the local heterogeneity around each cell - if very heterogeneous the cell should matter more; if homogeneous, the neighborhood should have a bigger weight.
+So, TRUE is better for not smoothing things out and getting into the microenvironment more carefully.
+
+We get these M things too:
+M0 alone → emphasizes homogeneous domain structure (good for core regions).
+M1 alone → emphasizes boundary / transitional states (good for fine segmentation).
+M0 + M1 → gives both global structure and local contrasts. This is often the default because it preserves both domain identity and edges.
+
+NOTE: If M is specified, it overwrites `use_agf`, so we'll just stick with `use_agf`.
+
+
+Let's do a quick side by side...
+and they are identical for this dataset....so, that's neat....
+
+```{r, fig.width = 12}
+set.seed(1000)
+se_true  <- Banksy::runBanksyPCA(se, use_agf = TRUE, lambda = 0.2)
+se_true  <- Banksy::clusterBanksy(se_true, use_agf = TRUE, lambda = 0.2)
+
+se_false <- Banksy::runBanksyPCA(se, use_agf = FALSE, lambda = 0.2)
+se_false <- Banksy::clusterBanksy(se_false, use_agf = FALSE, lambda = 0.2)
+
+cnames <- colnames(colData(se_true))
+cnames <- cnames[grep("^clust", cnames)]
+colData(se_true) <- cbind(colData(se_true), spatialCoords(se_true)) # gets sdimx sdimy into colData
+colData(se_false) <- cbind(colData(se_false), spatialCoords(se_false)) # gets sdimx sdimy into colData
+
+plot_false <- scater::plotColData(se_false,
+    x = "sdimx", y = "sdimy",
+    point_size = 0.6, colour_by = cnames[2]
+)
+plot_true <- scater::plotColData(se_true,
+    x = "sdimx", y = "sdimy",
+    point_size = 0.6, colour_by = cnames[2]
+)
+
+
+plot_grid(plot_false + coord_equal(), plot_true + coord_equal(), ncol = 2)
+
+
+table(
+  se_true$clust_M1_lam0.2_k50_res1.2,
+  se_false$clust_M1_lam0.2_k50_res1.2
+)
+
+```
+
+#### k-geometric
+
+k_geom specifies the number of neighbors used to compute each H_m for m=0,1. If a single value is specified, the same k_geom will be used for each feature matrix. Alternatively, multiple values of k_geom can be provided for each feature matrix. 
+
+**Here, we use k_geom[1]=15 and k_geom[2]=30 for H_0 and H_1 respectively. More neighbors are used to compute gradients.**
+
+```{r, eval=F}
+k_geom <- c(15, 30)
+se <- computeBanksy(se, assay_name = aname, compute_agf = TRUE, k_geom = k_geom)
+```
+> For datasets generated using Visium v1/v2, use `k_geom=18` (or `k_geom <- c(18, 18) if compute_agf = TRUE`), since that corresponds to taking as neighbourhood two concentric rings of spots around each spot.
+
+
+
+...Ok we're calling it. It's just explaining parameters.
+It does come with some nice helpers - like this fellow to compare clustering results in an object!
+
+```{r eval=F}
+#   func = c("ARI", "AMI", "MARI", "MARIraw", "RI", "NID", "NMI", "NVI"),
+compareClusters(se, func = "ARI")
+```
+
+
+```{r}
+sessionInfo()
+```
