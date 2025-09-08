@@ -1,0 +1,99 @@
+---
+title: "Neuroblastoma HTAN dataset: `r params$htan_id`"
+output: html_notebook
+params:
+  htan_id: "HTAPP-102-SMP-11_2"
+---
+
+## Set up
+
+```{r}
+repo_root <- rprojroot::find_root(rprojroot::is_git_root)
+renv::load(repo_root)
+
+suppressPackageStartupMessages({
+  library(SpatialExperiment)
+  library(SingleCellExperiment)
+  library(zellkonverter)
+  library(ggplot2)
+  library(patchwork)
+})
+
+set.seed(123)
+```
+
+
+
+
+## Read from h5ad and format for use
+
+
+```{r}
+data_dir <- file.path(
+  repo_root, 
+  "data", 
+  "htan_neuroblastoma_h5ad",
+  glue::glue("{params$htan_id}_slideseq.h5ad")
+)
+sce <- readH5AD("~/Downloads/HTAPP-102-SMP-11_2_slideseq.h5ad", 
+                raw = TRUE,
+                use_hdf5 = TRUE)
+
+spe <- SpatialExperiment(
+  assays = list(counts = assay(sce, "X")),
+  colData = colData(sce),
+  rowData = rowData(sce),
+  reducedDims = list(UMAP = reducedDim(sce, "X_umap")),
+  # this friendly argument moves those columns out of colData into the spatialCoords slot
+  spatialCoordsNames = c("x", "y")
+)
+rownames(spe) <- rowData(spe)$features # We have gene symbols now; we might want this as Ensembl?
+
+# We need to add an in_tissue column for a lot of the visualization functions to work
+# We'll assume everything is 1, but the seurat spatial tutorial doesn't explicitly introduce a filtering in tissue function so not clear how good an assumption this is? 
+# May be something to look into further.
+spe$in_tissue <- 1 
+```
+
+## Let's have a look
+
+```{r}
+spe
+```
+
+
+Note that we only have counts, not normalized counts, in these objects! But, we do have results from analyses that presumably used normalized counts - the object has `SCT` metadata, so someone normalized this at one point.
+
+Let's look at the colData:
+
+```{r}
+colData(spe)
+```
+
+
+### Viz
+
+We'll plot the coordinates colored by clusters, cell type, and then by **raw** total counts and total features as calculated by Seurat, just to get a sense.
+
+```{r, fig.width = 12, fig.height = 6}
+spe$seurat_clusters <- factor(spe$seurat_clusters)
+cluster_puck <- ggspavis::plotCoords(spe, annotate = "seurat_clusters", point_size = 0.1) + theme_void()
+celltype_puck <- ggspavis::plotCoords(spe, annotate = "celltype_max_likelihood", point_size = 0.1) + theme_void()
+
+cluster_puck + celltype_puck
+```
+
+
+```{r, fig.width = 10, fig.height = 6}
+cell_puck <- ggspavis::plotCoords(spe, annotate = "nCount_Spatial", point_size = 0.1) + theme_void()
+feature_puck <- ggspavis::plotCoords(spe, annotate = "nFeature_Spatial", point_size = 0.1) + theme_void()
+
+cell_puck + feature_puck
+```
+
+## Session Info
+
+```{r}
+sessionInfo()
+```
+
