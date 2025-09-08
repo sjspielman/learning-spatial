@@ -1,44 +1,30 @@
 # learning-spatial
 
-I'm doing tutorials and such.
-Aiming to treat this README like a lab notebook.
+In which Stephanie pokes around at spatial datasets and methods/tutorials.
 
-### 2025-08-07
+## `osta-tutorials`
 
-- Went through the Banksy quick start and a bit of a vignette that provides more (but not much!) context about choosing parameters
-  - Very quick, very straightforward to use, and there are strategies we can use to compare different flavors of clustering, e.g. how much cell vs neighborhood is considered
-  - Parameters can be set to the given technology so this is flexible for most input data
+Contains notebooks going through tutorials in [`Orchestrating Spatial Transcriptomics Analysis`](https://lmweber.org/OSTA/)
 
+## `method-tutorials`
 
-### 2025-08-01
+Contains notebooks going through tutorials for various methods in spatial transcriptomics. 
+Notebooks are named for the given method.
 
-- Went through the `SpaNorm` tutorial
-  - Method runs pretty quick and _with the tutorial example_ does seem to preserve biology more than scuttle
-  - But, method is very new and has not really been adopted yet, so unclear how important it is to show
-- Went through the `SpotSweeper` tutorial
-  - Also very quick method, and seems like an important approach to include in a workshop
-  - Has good QC plotting functionality
+## `data`
 
-### 2025-07-25
+Data not included in version control; see `data/README.md` for details on local files
 
-- Completed the OSTA: Visium HD workflow
-  - Comparisons of clustering, deconvolution between different spatial resolutions from 10x
-  - Several spatially-aware methods were presented:
-    - `SpotSweeper` for initial QC
-    - `BANKSY` for clustering (noting it used HVGs, not SVGs!)
-    - `spacexr` for deconvolution, but since Visium HD it's a different resolution from `spacexr` as presented in the `Vision: CRC` workflow, and associated exploratory analysis
+## `scpca`
 
-### 2025-07-18
+Contains a template notebook to explore a spatial library from `SCPCP000006`.
+Rendered notebooks, one per library,  are in `scpca/notebooks/`.
 
-- Environment setup is different from what we currently have on the server:
-  - I'm setting up on R `4.5` with Bioc `3.21`, which is where some of the dependencies need to be (e.g. some of `ggspavis`)
-  - We wouldn't get around to running this workshop for a little while, so it's not unreasonable to think we'd bump up at least to there by then
-- Completed the OSTA: Visium DLPFC workflow
-  - This workflow used essentially standard SCE-esque approaches for an `spe` object, i.e. _not spatially-aware methods_
-  - Introduced some nice `ggspavis` plots including QC plots
-  - The last part introduces their `spatialLBD` package which seems very nice but not for use in a workshop
-- Completed the OSTA: Visium CRC workflow
-  - Read in the 10x visium data directly with the `VisiumIO` package
-  - Showed a method for cell deconvolution `spacexr` which I'll look into further
-    - Some exploratory viz on these results too
-  - Introduced using AUCell, but I didn't go through that part
+To generate notebooks, use: `bash run_scpca.sh`
+
+## `htan-neuroblastoma`
+
+Contains a template notebook to explore a library from the [HTAN data](https://doi.org/10.1101/2024.01.07.574538).
+Rendered notebooks, one per library, are in `htan-neuroblastoma/notebooks/`.
+
+To generate notebooks, use: `bash run_htan-neuroblastoma.sh`
