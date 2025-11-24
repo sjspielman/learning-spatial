@@ -1,0 +1,222 @@
+---
+title: "Breast: 10x dataset with iIMPACT manual annotations"
+output: html_notebook
+---
+
+The iIMPACT paper includes manual path annotations for three of the 10x datasets - breast, ovarian, and prostate (adenocarcinoma).
+We'll have at one here.
+
+## Set up
+
+```{r}
+repo_root <- rprojroot::find_root(rprojroot::is_git_root)
+renv::load(repo_root)
+
+suppressPackageStartupMessages({
+  library(SpotSweeper)
+  library(SpatialExperiment)
+  library(scuttle)
+  library(ggplot2)
+  library(patchwork)
+  library(VisiumIO)
+})
+
+set.seed(2025)
+```
+
+
+```{r}
+data_path <- file.path(
+  repo_root, 
+  "data", 
+  "2025-11_data", 
+  "iIMPACT"
+)
+```
+
+
+This has no mitochondrial genes, _including_ if we read in the raw matrix.
+
+```{r}
+sample_dir <- file.path(data_path, "breast")
+
+# use type="sparse" for the directory; default wants the h5 file
+# note that if we wanted the raw matrix, use data = "raw"
+spe <- SpatialExperiment::read10xVisium(samples = file.path(sample_dir, "outs"), type = "sparse")
+# this will already be the case when reading in the filtered matrix but it's a good cue
+spe <- spe[, spe$in_tissue == 1] 
+```
+
+First we'll subset to only spots in tissue and visualize the data pre-filtering.
+
+```{r, warning = FALSE}
+# I turned off warnings since this spits out an aes_string() depr warning
+ggspavis::plotVisium(spe, zoom = TRUE) + ggspavis::plotVisium(spe, spots = FALSE,  zoom = TRUE)
+```
+```{r}
+annots <- readr::read_csv(
+  file.path(sample_dir, "10x_human_breast_cancer_ffpe_manual_annotation.csv")
+) |>
+  # includes a row name, so just keep data cols
+  dplyr::select(x, y, annotation)
+annots
+```
+Are these x/y coordinates spot coordinates?
+
+```{r}
+annots |>
+  dplyr::arrange(x)
+```
+
+```{r}
+coords_annot_df <- spatialCoords(spe) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("spot_barcode") |>
+  # make it match for joining
+  dplyr::rename(
+    x = pxl_row_in_fullres, 
+    y = pxl_col_in_fullres
+  ) |>
+  dplyr::left_join(annots, by = c("x","y"))
+coords_annot_df
+```
+Sure do - about half the spots have manual annotations. Let's add this to the object's colData for plotting.
+
+```{r}
+colData(spe) <- colData(spe) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("spot_barcode") |>
+  dplyr::left_join(
+    dplyr::select(coords_annot_df, spot_barcode, annotation), 
+    by = "spot_barcode"
+  ) |>
+  DataFrame(row.names = colnames(spe))
+```
+
+```{r, warning = FALSE, fig.width = 12}
+# I turned off warnings since this spits out an aes_string() depr warning
+ggspavis::plotVisium(spe, zoom = TRUE, spots = FALSE) + 
+  ggspavis::plotVisium(spe, annotate = "annotation", zoom = TRUE) + scale_fill_brewer(palette = "Dark2", na.value = "grey90") + theme(legend.position = "bottom") +
+  ggspavis::plotCoords(spe, annotate = "annotation") + scale_color_brewer(palette = "Dark2", na.value = "grey90") + theme(legend.position = "bottom")
+```
+
+
+
+What happens with filtering?
+
+```{r}
+spe <- addPerCellQCMetrics(spe, subsets= list(mito=grep("^MT-", rowData(spe)$Symbol)))
+
+spe <- localOutliers(spe,metric = "sum",direction = "lower",log = TRUE) ### --> sum_outliers
+spe <- localOutliers(spe,metric = "detected", direction = "lower",log = TRUE) #---> detected_outliers
+spe <- localOutliers(spe,metric = "subsets_mito_percent",direction = "higher",log = FALSE) #----> subsets_mito_percent_outliers
+
+# combine all the outlier detections into a single column:
+# combine all outliers into "local_outliers" column
+spe$local_outliers <- as.logical(spe$sum_outliers) |
+    as.logical(spe$detected_outliers) |
+    as.logical(spe$subsets_mito_percent_outliers)
+```
+
+
+```{r}
+a <- ggspavis::plotCoords(spe, annotate = "subsets_mito_percent")
+b <- ggspavis::plotCoords(spe, annotate = "sum")
+cc <- ggspavis::plotCoords(spe, annotate = "detected")
+d <- ggspavis::plotCoords(spe, annotate = "local_outliers") + 
+  scale_color_manual(values = c("gray90", "red"))
+
+patchwork::wrap_plots(a, b, cc, d, nrow =2)
+```
+
+```{r}
+spe <- spe[, !spe$local_outliers]
+spe
+```
+
+
+## Normalization
+
+```{r}
+spe <- scuttle::computeLibraryFactors(spe)
+spe <- logNormCounts(spe)
+```
+
+
+## Dimension reduction & clustering
+
+We'll do dimension reduction and clustering in a few ways:
+
+- Using `BANKSY` PCA with `lambda = 0.2` for spatial domains
+- Non-spatial using `scuttle` with HVGs for PCA
+
+
+```{r, warning=FALSE, message=FALSE}
+spe <- Banksy::computeBanksy(spe, assay_name = "logcounts")
+spe <- Banksy::runBanksyPCA(spe)
+spe <- Banksy::runBanksyUMAP(spe)
+colData(spe)$banksy_clusters <- scran::clusterCells(spe, use.dimred = "PCA_M0_lam0.2", BLUSPARAM = bluster::NNGraphParam(
+    k = 50,
+    cluster.fun = "louvain"
+  ))
+```
+
+
+```{r}
+# "regular" clustering
+gene_variance <- scran::modelGeneVar(spe)
+highvar_genes <- scran::getTopHVGs(spe, n = 2000) 
+spe <- scater::runPCA(spe, subset_row = highvar_genes)
+spe <- scater::runUMAP(spe)
+colData(spe)$regular_clusters <- scran::clusterCells(spe, use.dimred = "PCA", BLUSPARAM = bluster::NNGraphParam(
+    k = 20,
+    cluster.fun = "louvain"
+  ))
+```
+
+
+
+```{r, fig.width  = 14, fig.height = 5}
+umap_plot <- scater::plotReducedDim(spe, dimred = "UMAP_M0_lam0.2", color_by = "banksy_clusters") + ggtitle("Bansky lambda = 0.2") + theme(legend.position = "bottom") +
+  scater::plotUMAP(spe, color_by = "regular_clusters") + ggtitle("Regular") + theme(legend.position = "bottom")
+umap_plot
+```
+
+
+```{r}
+spe <- BayesSpace::qTune(spe, qs=seq(2, 20), platform="Visium", cores=4)
+BayesSpace::qPlot(spe)
+```
+8 clusters it is!
+this is slow as heck.
+
+```{r}
+# default is 50k chain with 1000 burnin
+set.seed(11)
+spe <- BayesSpace::spatialCluster(
+  spe, 
+  q=8, 
+  platform="Visium", 
+  gamma=3, # recommended for visium
+  nrep = 10000,
+  burn.in = 1000
+)
+spe$spatial.cluster <- as.factor(spe$spatial.cluster)
+```
+
+
+```{r, fig.width  = 12, fig.height = 6}
+ggspavis::plotCoords(spe, annotate = "banksy_clusters") + ggtitle("Bansky") + theme(legend.position = "none") + 
+  ggspavis::plotCoords(spe, annotate = "spatial.cluster") + ggtitle("BayesSpace")  + theme(legend.position = "none") +
+  ggspavis::plotCoords(spe, annotate = "regular_clusters") + ggtitle("non-spatial")  + theme(legend.position = "none") +
+  ggspavis::plotCoords(spe, annotate = "annotation") + scale_color_brewer(palette = "Dark2", na.value = "grey90")
+```
+
+
+
+## session info
+
+```{r}
+sessionInfo()
+```
+
