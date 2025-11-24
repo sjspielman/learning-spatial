@@ -1,0 +1,217 @@
+---
+title: "Marker gene expression for `r params$library_id`"
+output: 
+  html_notebook:
+    code_folding: hide
+params:
+  sample_id: "SCPCS000168"
+  library_id: "SCPCL000436"
+---
+
+## Set up
+
+```{r}
+knitr::opts_chunk$set(warning = F, message = F)
+repo_root <- rprojroot::find_root(rprojroot::is_git_root)
+renv::load(repo_root)
+
+suppressPackageStartupMessages({
+  library(SpotSweeper)
+  library(SpatialExperiment)
+  library(scuttle)
+  library(ggplot2)
+  library(patchwork)
+})
+theme_set(theme_bw())
+set.seed(123)
+```
+
+
+
+```{r}
+genes_df <- readr::read_csv("~/ALSF/openscpca/OpenScPCA-analysis/analyses/cell-type-wilms-tumor-06/marker_sets/CellType_metadata.csv")
+gene_categories_df <- genes_df |>
+  dplyr::mutate(category = ifelse(
+    cell_class == "malignant", cell_type, cell_class
+  )) |> 
+  dplyr::select(gene_symbol, category) |>
+  tidyr::drop_na() |>
+  dplyr::arrange(category) |>
+  dplyr::filter(category != "non-malignant") # only 1 gene
+
+```
+
+```{r}
+data_path <- file.path(
+  repo_root, 
+  "data", 
+  "scpca_data", 
+  "SCPCP000006_SPATIAL_SINGLE-CELL-EXPERIMENT_2025-11-23", 
+  params$sample_id, 
+  glue::glue("{params$library_id}_spatial")
+) 
+
+sample_dir <- file.path(data_path, "outs")
+
+############## LAME ########################
+# it doesnt like that we have a json and html file there.
+fs::dir_create(sample_dir)
+if(dir.exists(file.path(data_path, "spatial"))) {
+  fs::file_move(
+    file.path(data_path, "spatial"), 
+    sample_dir
+  )
+}
+if(dir.exists(file.path(data_path, "filtered_feature_bc_matrix"))) {
+  fs::file_move(
+    file.path(data_path, "filtered_feature_bc_matrix"), 
+    sample_dir
+  )
+}
+#######################################
+spe <- SpatialExperiment::read10xVisium(
+  samples = sample_dir, 
+  type = "sparse", 
+  images = "hires")
+```
+
+```{r}
+# add qc metrics
+spe <- addPerCellQCMetrics(spe, subsets= list(mito=grep("^MT-", rowData(spe)$Symbol)))
+
+# these all get named in the colData as "{metric}_outliers"
+# library size
+spe <- localOutliers(spe,
+    metric = "sum",
+    direction = "lower",
+    log = TRUE
+) ### --> sum_outliers
+
+# unique genes
+spe <- localOutliers(spe,
+    metric = "detected",
+    direction = "lower",
+    log = TRUE
+) #---> detected_outliers
+
+# mitochondrial percent
+spe <- localOutliers(spe,
+    metric = "subsets_mito_percent",
+    direction = "higher",
+    log = FALSE
+) #----> subsets_mito_percent_outliers
+
+
+# combine all the outlier detections into a single column:
+# combine all outliers into "local_outliers" column
+spe$local_outliers <- as.logical(spe$sum_outliers) |
+    as.logical(spe$detected_outliers) |
+    as.logical(spe$subsets_mito_percent_outliers)
+spe <- spe[, !spe$local_outliers]
+```
+
+
+```{r}
+spe <- scuttle::computeLibraryFactors(spe)
+spe <- logNormCounts(spe)
+```
+
+```{r}
+spe <- Banksy::computeBanksy(spe,  compute_agf = TRUE, k_geom= 18 , assay = "logcounts")
+spe <- Banksy::runBanksyPCA(spe, use_agf = TRUE)
+spe <- Banksy::runBanksyUMAP(spe, use_agf = TRUE)
+colData(spe)$banksy_clusters <- scran::clusterCells(spe, use.dimred = "PCA_M1_lam0.2", BLUSPARAM = bluster::NNGraphParam(
+    k = 20,
+    cluster.fun = "louvain"
+  ))
+gene_variance <- scran::modelGeneVar(spe)
+highvar_genes <- scran::getTopHVGs(spe, n = 2000)
+spe <- scater::runPCA(spe, subset_row = highvar_genes)
+spe <- scater::runUMAP(spe)
+colData(spe)$regular_clusters <- scran::clusterCells(spe, use.dimred = "PCA", BLUSPARAM = bluster::NNGraphParam(
+    k = 20,
+    cluster.fun = "louvain"
+  ))
+```
+
+
+
+
+```{r, fig.width  = 8, fig.height = 4}
+ensembl_marker_df <- data.frame(
+  gene_symbol = rowData(spe)$symbol, 
+  ensembl = rownames(spe)
+) |>
+  dplyr::inner_join(gene_categories_df, by = "gene_symbol")
+
+expr_df <- scuttle::makePerCellDF(spe, features = ensembl_marker_df$ensembl, use.dimred = FALSE, use.coldata = FALSE) |>
+  as.data.frame() |>
+  dplyr::mutate(barcode = colnames(spe)) |>
+  tidyr::pivot_longer(
+    -barcode, 
+    names_to = "ensembl", 
+    values_to = "logcounts"
+  ) |>
+  dplyr::inner_join(ensembl_marker_df, by = "ensembl") 
+
+category_expr_df <- expr_df |>
+  dplyr::group_by(barcode, category) |>
+  dplyr::summarize(total_expr = sum(logcounts)) |>
+  dplyr::ungroup()
+
+category_expr_z_df <- category_expr_df |>
+  dplyr::group_by(category) |>
+  dplyr::mutate(scaled_total_expr = scale(total_expr)) |>
+  dplyr::select(-total_expr)
+
+colData(spe) <- colData(spe) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("barcode") |>
+  dplyr::left_join(
+    tidyr::pivot_wider(category_expr_z_df, names_from = "category", values_from = "scaled_total_expr"), 
+    by = "barcode"
+  ) |>
+  DataFrame(row.names = colnames(spe))
+
+```
+
+
+
+```{r, fig.width  = 12, fig.height = 3.5}
+ggspavis::plotVisium(spe, spots = FALSE, zoom = TRUE)  +
+ggspavis::plotCoords(spe, annotate = "banksy_clusters") + ggtitle("Bansky") + theme(legend.position = "none") +
+ggspavis::plotCoords(spe, annotate = "regular_clusters") + ggtitle("Regular") + theme(legend.position = "none")
+```
+
+#### scaled expression of sum of genes each cateory (2-4)
+
+Scaled per category,
+
+```{r, fig.width = 12, fig.height = 6}
+unique(category_expr_z_df$category) |>
+  purrr::map(
+    \(category) ggspavis::plotCoords(spe, annotate = category) + scale_color_gradient2() 
+  ) |>
+  patchwork::wrap_plots()
+
+```
+
+
+```{r}
+ggplot(category_expr_df) + 
+  aes(x = total_expr, y = category, fill = category) + 
+  ggridges::geom_density_ridges() +
+  labs(
+    x = "sum of expression",
+    y = "category (2-4 genes each)"
+  )
+```
+
+
+
+## session info
+
+```{r}
+sessionInfo()
+```
+
