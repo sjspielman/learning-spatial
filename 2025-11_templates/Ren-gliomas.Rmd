@@ -1,0 +1,210 @@
+---
+title: "Ren et al glioma dataset: `r params$sample_name`"
+output: html_notebook
+params:
+  sample_name: "DMG1"
+---
+
+## Set up
+
+```{r}
+repo_root <- rprojroot::find_root(rprojroot::is_git_root)
+renv::load(repo_root)
+
+suppressPackageStartupMessages({
+  library(SpotSweeper)
+  library(SpatialExperiment)
+  library(scuttle)
+  library(ggplot2)
+  library(patchwork)
+  library(VisiumIO)
+})
+
+set.seed(2025)
+```
+
+
+
+
+## Read! 
+
+
+```{r}
+data_path <- file.path(
+  repo_root, 
+  "data", 
+  "2025-11_data", 
+  "Ren-gliomas", 
+  "GSE194329_RAW"
+) 
+sample_dir <- file.path(data_path, paste0(params$sample_name, "_spaceranger_out"))
+
+# This isn't work for me, not sure why? space ranger version?
+# spe <- SpatialExperiment::read10xVisium(samples = sample_dir)
+
+# We'll fall back on VisiumIO then
+tenx_object_raw_matrix <- VisiumIO::TENxVisium(
+  resources = file.path(sample_dir, "filtered_feature_bc_matrix"),
+  spatialResource = file.path(sample_dir, "spatial"),
+  # NEEDED: the default includes `cytassist` and these samples don't have
+  images = c("lowres", "hires", "detected", "aligned")
+)
+spe <- import(tenx_object_raw_matrix)
+```
+
+First we'll subset to only spots in tissue and visualize the data pre-filtering.
+
+```{r, warning = FALSE}
+# this will generally be the case when reading in the filtered matrix but it doesn't hurt anyone!
+spe <- spe[, spe$in_tissue == 1] 
+
+# I turned off warnings since this spits out an aes_string() depr warning
+ggspavis::plotVisium(spe, zoom = TRUE) + ggspavis::plotVisium(spe, spots = FALSE)
+```
+## QC 
+
+We'll detect local outliers with SpotSweeper, viz, and filter them.
+
+```{r}
+# add qc metrics
+spe <- addPerCellQCMetrics(spe, subsets= list(mito=grep("^MT-", rowData(spe)$Symbol)))
+
+# these all get named in the colData as "{metric}_outliers"
+# library size
+spe <- localOutliers(spe,
+    metric = "sum",
+    direction = "lower",
+    log = TRUE
+) ### --> sum_outliers
+
+# unique genes
+spe <- localOutliers(spe,
+    metric = "detected",
+    direction = "lower",
+    log = TRUE
+) #---> detected_outliers
+
+# mitochondrial percent
+spe <- localOutliers(spe,
+    metric = "subsets_mito_percent",
+    direction = "higher",
+    log = FALSE
+) #----> subsets_mito_percent_outliers
+
+
+# combine all the outlier detections into a single column:
+# combine all outliers into "local_outliers" column
+spe$local_outliers <- as.logical(spe$sum_outliers) |
+    as.logical(spe$detected_outliers) |
+    as.logical(spe$subsets_mito_percent_outliers)
+```
+
+
+```{r}
+table(spe$local_outliers)
+```
+
+Plot some QC metrics:
+
+```{r}
+a <- ggspavis::plotCoords(spe, annotate = "subsets_mito_percent")
+b <- ggspavis::plotCoords(spe, annotate = "sum")
+cc <- ggspavis::plotCoords(spe, annotate = "detected")
+d <- ggspavis::plotCoords(spe, annotate = "local_outliers") + 
+  scale_color_manual(values = c("gray90", "red"))
+
+patchwork::wrap_plots(a, b, cc, d, nrow =2)
+```
+
+Filter them out:
+
+```{r}
+spe <- spe[, !spe$local_outliers]
+```
+
+
+And show where we are now:
+
+```{r}
+spe
+```
+
+
+## Normalization
+
+```{r}
+spe <- scuttle::computeLibraryFactors(spe)
+spe <- logNormCounts(spe)
+```
+
+
+## Dimension reduction & clustering
+
+We'll do dimension reduction and clustering in a few ways:
+
+- Using `BANKSY` PCA with `lambda = 0.2` for spatial domains, with AGF turned on
+- Using `BayesSpace` 
+- Non-spatial using `scuttle` with HVGs for PCA
+
+All clustering will be louvain with 20 nearest neighbors, resolution of 1.
+We'll plot the results on UMAPs and the spatial coordinates.
+
+```{r, warning=FALSE, message=FALSE}
+# 0.2 is the visium domain recommendation
+lambda <- c(0, 0.2)
+k_geom <- 18  # also recommended for visium; may not be ideal for this data since we have varying quality, but it's fine for a cursory look
+
+# adds assays and metadata
+spe <- Banksy::computeBanksy(spe,  compute_agf = TRUE, assay_name = "logcounts", k_geom = k_geom)
+spe <- Banksy::runBanksyPCA(spe, use_agf = TRUE, lambda = lambda)
+spe <- Banksy::runBanksyUMAP(spe, use_agf = TRUE, lambda = lambda)
+colData(spe)$banksy_clusters <- scran::clusterCells(spe, use.dimred = "PCA_M1_lam0.2", BLUSPARAM = bluster::NNGraphParam(
+    k = 20,
+    cluster.fun = "louvain"
+  ))
+```
+
+
+```{r}
+# "regular" pca
+gene_variance <- scran::modelGeneVar(spe)
+highvar_genes <- scran::getTopHVGs(spe, n = 2000) 
+spe <- scater::runPCA(spe, subset_row = highvar_genes)
+spe <- scater::runUMAP(spe)
+colData(spe)$regular_clusters <- scran::clusterCells(spe, use.dimred = "PCA", BLUSPARAM = bluster::NNGraphParam(
+    k = 20,
+    cluster.fun = "louvain"
+  ))
+```
+
+
+
+```{r, fig.width  = 14, fig.height = 5}
+umap_plot <- scater::plotReducedDim(spe, dimred = "UMAP_M1_lam0.2", color_by = "banksy_clusters") + ggtitle("Bansky lambda = 0.2") + theme(legend.position = "bottom") +
+  scater::plotUMAP(spe, color_by = "regular_clusters") + ggtitle("Regular") + theme(legend.position = "bottom")
+umap_plot
+```
+
+
+```{r, fig.width  = 12, fig.height = 4}
+coord_plot <- ggspavis::plotCoords(spe, annotate = "banksy_clusters") + ggtitle("Bansky lambda=0.2") + theme(legend.position = "none") + 
+  ggspavis::plotCoords(spe, annotate = "regular_clusters") + ggtitle("Regular")  + theme(legend.position = "none") +
+  ggspavis::plotVisium(spe, zoom = TRUE, spots = FALSE)
+coord_plot
+  
+```
+
+## Let's color genes because we can
+
+```{r}
+ggspavis::plotCoords(spe, annotate = "ENSG00000183715") # OPCML
+ggspavis::plotCoords(spe, annotate = "OLIG2", feature_names = "Symbol")
+```
+
+
+## session info
+
+```{r}
+sessionInfo()
+```
+
