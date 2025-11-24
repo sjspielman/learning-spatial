@@ -13654,6 +13654,11 @@
       "Maintainer": "Yihui Xie <xie@yihui.name>",
       "Repository": "CRAN"
     },
+    "xgboost": {
+      "Package": "xgboost",
+      "Version": "1.7.11.1",
+      "Source": "Repository"
+    },
     "xtable": {
       "Package": "xtable",
       "Version": "1.8-4",
