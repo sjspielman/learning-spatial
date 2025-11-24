@@ -30,7 +30,7 @@ for sample_id in $(basename -a ${data_dir}/SCPCS*); do
         continue
       fi
 
-       Rscript -e "rmarkdown::render('scpca/scpca-libraries.Rmd',
+       rig run --r-version 4.5-arm64 -e -e "rmarkdown::render('scpca/scpca-libraries.Rmd',
          output_dir='${output_dir}',
          output_file = '${library_id}.html',
          params = list(sample_id = '${sample_id}', library_id = '${library_id}'))"
